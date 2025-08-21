@@ -37,7 +37,7 @@ var (
 // ========================= Polygon Types =========================
 
 type polygonBar struct {
-	T int64   `json:"t"` // ms epoch (start of interval for intraday)
+	T int64   `json:"t"` // ms epoch (for intraday: start of minute)
 	O float64 `json:"o"`
 	H float64 `json:"h"`
 	L float64 `json:"l"`
@@ -52,24 +52,23 @@ type polygonResp struct {
 // ========================= Gap Analysis Types =========================
 
 type GapPoint struct {
-	Date            string  `json:"date"`                 // YYYY-MM-DD (NY)
+	Date            string  `json:"date"`                 // YYYY-MM-DD (NY session date)
 	GapPct          float64 `json:"gap_pct"`              // (open-prevClose)/prevClose * 100
 	DailyReturnPct  float64 `json:"daily_return_pct"`     // (close-open)/open * 100
 	Direction       int     `json:"direction"`            // 1 gap-up, -1 gap-down
 	SameDir         int     `json:"same_dir"`             // 1 continuation (close dir == gap dir)
-	Filled          int     `json:"filled"`               // gap filled intraday
+	Filled          int     `json:"filled"`               // gap filled intraday (daily window)
 	Bin             string  `json:"bin"`                  // gap bin label
 	Open            float64 `json:"open,omitempty"`
 	Close           float64 `json:"close,omitempty"`
 	PrevClose       float64 `json:"prev_close,omitempty"`
 	DayOfWeek       string  `json:"dow,omitempty"`        // Mon..Fri
 
-	// New: 0–15m snapshot (to 09:45 ET)
-	Ret15mPct     float64 `json:"ret_15m_pct,omitempty"`     // (09:45 - 09:30) / 09:30 * 100
-	FilledBy0945  int     `json:"filled_by_0945,omitempty"`  // gap filled within first 15m
+	// 0–15m snapshot (to 09:45 ET) — from 1-minute bars
+	Ret15mPct    float64 `json:"ret_15m_pct,omitempty"`     // (09:45 - 09:30) / 09:30 * 100
+	FilledBy0945 int     `json:"filled_by_0945,omitempty"`  // gap filled within first 15m
 }
 
-// Daily (close-to-open) bin stats
 type BinStat struct {
 	Label            string  `json:"label"`
 	Count            int     `json:"count"`
@@ -108,15 +107,14 @@ type Summary struct {
 	ExpectedReturn   float64 `json:"expected_return"`
 }
 
-// New: 0–15m summary + bins
 type Summary15 struct {
-	Sessions             int     `json:"sessions"`
-	ContinuationRate     float64 `json:"continuation_rate"`       // to 09:45
-	FadeAvg              float64 `json:"fade_avg"`                // avg % per trade (0–15m)
-	FollowAvg            float64 `json:"follow_avg"`              // avg % per trade (0–15m)
-	BestStrategy         string  `json:"best_strategy"`           // FADE/FOLLOW/NEUTRAL (0–15m)
-	ExpectedReturn       float64 `json:"expected_return"`         // best strategy expected (0–15m)
-	GapFillBy0945Rate    float64 `json:"gap_fill_by_0945_rate"`   // %
+	Sessions          int     `json:"sessions"`
+	ContinuationRate  float64 `json:"continuation_rate"`       // to 09:45
+	FadeAvg           float64 `json:"fade_avg"`                // avg % per trade (0–15m)
+	FollowAvg         float64 `json:"follow_avg"`              // avg % per trade (0–15m)
+	BestStrategy      string  `json:"best_strategy"`           // FADE/FOLLOW/NEUTRAL (0–15m)
+	ExpectedReturn    float64 `json:"expected_return"`         // best strategy expected (0–15m)
+	GapFillBy0945Rate float64 `json:"gap_fill_by_0945_rate"`   // %
 }
 
 type BinStat15 struct {
@@ -137,7 +135,7 @@ type AnalyzeResponse struct {
 	MinGap  float64    `json:"min_gap"`
 	Data    []GapPoint `json:"data"`
 
-	// Daily (close-to-open) analytics
+	// Daily analytics
 	Summary  Summary            `json:"summary"`
 	Bins     []BinStat          `json:"bins"`
 	ByDOW    map[string]DowStat `json:"by_dow"`
@@ -148,7 +146,7 @@ type AnalyzeResponse struct {
 	CumFade   []float64 `json:"cum_fade"`
 	CumFollow []float64 `json:"cum_follow"`
 
-	// New: 0–15m analytics
+	// 0–15m analytics (from 1-minute bars)
 	Summary15  Summary15           `json:"summary_15m"`
 	Bins15     []BinStat15         `json:"bins_15m"`
 	ByDOW15    map[string]DowStat  `json:"by_dow_15m"`
@@ -167,26 +165,69 @@ func sign(x float64) int {
 	}
 	return 0
 }
-
-func pct(a, b float64) float64 {
-	if b == 0 {
+func rate(n, d int) float64 {
+	if d == 0 {
 		return 0
 	}
-	return (a / b * 100.0)
+	return round1(float64(n) / float64(d) * 100.0)
+}
+func avg(sum float64, n int) float64 {
+	if n == 0 {
+		return 0
+	}
+	return round3(sum / float64(n))
 }
 
 func toNY(t time.Time) time.Time {
 	loc, _ := time.LoadLocation("America/New_York")
 	return t.In(loc)
 }
-
 func dateNY(tms int64) string {
 	return toNY(time.UnixMilli(tms)).Format("2006-01-02")
 }
-
 func weekdayNY(tms int64) string {
 	return toNY(time.UnixMilli(tms)).Weekday().String()[:3] // Mon Tue Wed Thu Fri
 }
+
+// Polygon daily 't' is 00:00 UTC of the session; in NY this shows as previous calendar date.
+// Shift +24h in NY to label by the actual RTH session date (date of the 09:30 open).
+func sessionDateNYFromDaily(tms int64) string {
+	return toNY(time.UnixMilli(tms)).Add(24 * time.Hour).Format("2006-01-02")
+}
+func sessionWeekdayNYFromDaily(tms int64) string {
+	return toNY(time.UnixMilli(tms)).Add(24 * time.Hour).Weekday().String()[:3]
+}
+
+type gapBin struct {
+	min float64
+	max float64
+	lab string
+}
+func defaultBins(minGap float64) []gapBin {
+	start := minGap
+	if start < 0.1 {
+		start = 0.1
+	}
+	return []gapBin{
+		{min: start, max: 0.5, lab: fmt.Sprintf("%.1f–0.5%%", start)},
+		{min: 0.5, max: 1.0, lab: "0.5–1.0%"},
+		{min: 1.0, max: 1.5, lab: "1.0–1.5%"},
+		{min: 1.5, max: 99.0, lab: ">1.5%"},
+	}
+}
+func labelFor(absGap float64, bins []gapBin) string {
+	for _, b := range bins {
+		if absGap >= b.min && absGap < b.max {
+			return b.lab
+		}
+	}
+	return "other"
+}
+func round1(f float64) float64 { return math.Round(f*10) / 10 }
+func round2(f float64) float64 { return math.Round(f*100) / 100 }
+func round3(f float64) float64 { return math.Round(f*1000) / 1000 }
+
+// ========================= Polygon fetchers =========================
 
 // Daily bars (RTH) — unadjusted for literal tape gaps
 func fetchPolygonDaily(ticker, from, to string) ([]polygonBar, error) {
@@ -209,25 +250,35 @@ func fetchPolygonDaily(ticker, from, to string) ([]polygonBar, error) {
 	return pr.Results, nil
 }
 
-// New: 15-minute bars — we use the first (09:30–09:45) each day
-func fetchPolygon15Min(ticker, from, to string) ([]polygonBar, error) {
-	url := fmt.Sprintf(
-		"https://api.polygon.io/v2/aggs/ticker/%s/range/15/minute/%s/%s?adjusted=false&sort=asc&limit=50000&apiKey=%s",
-		ticker, from, to, polygonAPIKey,
-	)
-	resp, err := http.Get(url)
-	if err != nil {
-		return nil, err
+// 1-minute bars for specific NY-session dates (from=to=date). Returns a map[YYYY-MM-DD][]minuteBars.
+func fetchPolygon1MinForDates(ticker string, dates []string) (map[string][]polygonBar, error) {
+	out := make(map[string][]polygonBar, len(dates))
+	for i, d := range dates {
+		url := fmt.Sprintf(
+			"https://api.polygon.io/v2/aggs/ticker/%s/range/1/minute/%s/%s?adjusted=false&sort=asc&limit=50000&apiKey=%s",
+			ticker, d, d, polygonAPIKey,
+		)
+		resp, err := http.Get(url)
+		if err != nil {
+			return nil, err
+		}
+		func() {
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				// Skip this date if the provider returns an error for that day
+				return
+			}
+			var pr polygonResp
+			if err := json.NewDecoder(resp.Body).Decode(&pr); err == nil {
+				out[d] = pr.Results
+			}
+		}()
+		// Be nice to the API (mild pacing).
+		if (i+1)%5 == 0 {
+			time.Sleep(200 * time.Millisecond)
+		}
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("polygon (15m): %s", resp.Status)
-	}
-	var pr polygonResp
-	if err := json.NewDecoder(resp.Body).Decode(&pr); err != nil {
-		return nil, err
-	}
-	return pr.Results, nil
+	return out, nil
 }
 
 func openBrowser(u string) {
@@ -238,37 +289,10 @@ func openBrowser(u string) {
 	}
 }
 
-// ========================= Core Analysis =========================
+// ========================= Analysis =========================
 
-type gapBin struct {
-	min float64
-	max float64
-	lab string
-}
-
-func defaultBins(minGap float64) []gapBin {
-	start := minGap
-	if start < 0.1 {
-		start = 0.1
-	}
-	return []gapBin{
-		{min: start, max: 0.5, lab: fmt.Sprintf("%.1f–0.5%%", start)},
-		{min: 0.5, max: 1.0, lab: "0.5–1.0%"},
-		{min: 1.0, max: 1.5, lab: "1.0–1.5%"},
-		{min: 1.5, max: 99.0, lab: ">1.5%"},
-	}
-}
-
-func labelFor(absGap float64, bins []gapBin) string {
-	for _, b := range bins {
-		if absGap >= b.min && absGap < b.max {
-			return b.lab
-		}
-	}
-	return "other"
-}
-
-func analyzeGaps(daily []polygonBar, m15 []polygonBar, minGap float64, years int, ticker string) AnalyzeResponse {
+// Pass 1: compute daily analytics and return the list of gap sessions we’ll need minute data for.
+func analyzeDaily(daily []polygonBar, minGap float64, years int, ticker string) (AnalyzeResponse, []GapPoint) {
 	resp := AnalyzeResponse{
 		Success: true,
 		Ticker:  ticker,
@@ -278,16 +302,7 @@ func analyzeGaps(daily []polygonBar, m15 []polygonBar, minGap float64, years int
 	if len(daily) < 2 {
 		resp.Success = false
 		resp.Error = "not enough data"
-		return resp
-	}
-
-	// Build a map: YYYY-MM-DD (NY) -> first 15m bar (09:30–09:45)
-	first15 := map[string]polygonBar{}
-	for _, b := range m15 {
-		ny := toNY(time.UnixMilli(b.T))
-		if ny.Hour() == 9 && ny.Minute() == 30 {
-			first15[ny.Format("2006-01-02")] = b
-		}
+		return resp, nil
 	}
 
 	bins := defaultBins(minGap)
@@ -295,25 +310,13 @@ func analyzeGaps(daily []polygonBar, m15 []polygonBar, minGap float64, years int
 		count, cont, filled int
 		sumFade, sumFollow  float64
 	}
-	type agg15 struct {
-		count, cont, filledBy0945 int
-		sumFade, sumFollow        float64
-	}
-
 	binAgg := map[string]*agg{}
-	binAgg15 := map[string]*agg15{}
 	for _, b := range bins {
 		binAgg[b.lab] = &agg{}
-		binAgg15[b.lab] = &agg15{}
 	}
-
 	upAgg := agg{}
 	downAgg := agg{}
 	dowAgg := map[string]*agg{"Mon": {}, "Tue": {}, "Wed": {}, "Thu": {}, "Fri": {}}
-
-	upAgg15 := agg15{}
-	downAgg15 := agg15{}
-	dowAgg15 := map[string]*agg15{"Mon": {}, "Tue": {}, "Wed": {}, "Thu": {}, "Fri": {}}
 
 	points := make([]GapPoint, 0, len(daily)-1)
 
@@ -325,10 +328,6 @@ func analyzeGaps(daily []polygonBar, m15 []polygonBar, minGap float64, years int
 	var cumFade, cumFollow float64
 	var cumDates []string
 	var cumFadeArr, cumFollowArr []float64
-
-	// New: 0–15m aggregates
-	var fadeSum15, followSum15 float64
-	var contCount15, filledBy0945Count, sessions15 int
 
 	for i := 1; i < len(daily); i++ {
 		prev := daily[i-1]
@@ -347,11 +346,11 @@ func analyzeGaps(daily []polygonBar, m15 []polygonBar, minGap float64, years int
 		}
 		dr := (close - open) / open * 100.0
 		dir := sign(gapPct)
+
 		same := 0
 		if sign(dr) == dir && dir != 0 && dr != 0 {
 			same = 1
 		}
-		// Daily gap fill
 		filled := 0
 		if (dir == 1 && day.L <= prevClose) || (dir == -1 && day.H >= prevClose) {
 			filled = 1
@@ -359,9 +358,8 @@ func analyzeGaps(daily []polygonBar, m15 []polygonBar, minGap float64, years int
 
 		absGap := math.Abs(gapPct)
 		bin := labelFor(absGap, bins)
-		dow := weekdayNY(day.T)
+		dow := sessionWeekdayNYFromDaily(day.T)
 
-		// Strategy returns per trade (close-to-open window)
 		followRet := float64(dir) * dr
 		fadeRet := -float64(dir) * dr
 
@@ -384,13 +382,13 @@ func analyzeGaps(daily []polygonBar, m15 []polygonBar, minGap float64, years int
 		followSum += followRet
 		fadeSum += fadeRet
 
-		cumDates = append(cumDates, dateNY(day.T))
+		sessDate := sessionDateNYFromDaily(day.T)
+		cumDates = append(cumDates, sessDate)
 		cumFollow += followRet
 		cumFade += fadeRet
 		cumFollowArr = append(cumFollowArr, round3(cumFollow))
 		cumFadeArr = append(cumFadeArr, round3(cumFade))
 
-		// bin & side & DOW aggregates — daily
 		if ba := binAgg[bin]; ba != nil {
 			ba.count++
 			ba.sumFollow += followRet
@@ -426,76 +424,8 @@ func analyzeGaps(daily []polygonBar, m15 []polygonBar, minGap float64, years int
 			}
 		}
 
-		// ==== New: 0–15m window (to 09:45 ET) ====
-		dateStr := dateNY(day.T)
-		var ret15 float64
-		var cont15, filled0945 int
-		if fb, ok := first15[dateStr]; ok && open > 0 {
-			ret15 = (fb.C - open) / open * 100.0
-			if sign(ret15) == dir && dir != 0 && ret15 != 0 {
-				cont15 = 1
-			}
-			if (dir == 1 && fb.L <= prevClose) || (dir == -1 && fb.H >= prevClose) {
-				filled0945 = 1
-			}
-
-			followRet15 := float64(dir) * ret15
-			fadeRet15 := -float64(dir) * ret15
-
-			followSum15 += followRet15
-			fadeSum15 += fadeRet15
-			contCount15 += cont15
-			filledBy0945Count += filled0945
-			sessions15++
-
-			// bin/side/dow aggregates — 0–15m
-			if ba := binAgg15[bin]; ba != nil {
-				ba.count++
-				ba.sumFollow += followRet15
-				ba.sumFade += fadeRet15
-				if cont15 == 1 {
-					ba.cont++
-				}
-				if filled0945 == 1 {
-					ba.filledBy0945++
-				}
-			}
-			if dir == 1 {
-				upAgg15.count++
-				upAgg15.sumFollow += followRet15
-				upAgg15.sumFade += fadeRet15
-				if cont15 == 1 {
-					upAgg15.cont++
-				}
-				if filled0945 == 1 {
-					upAgg15.filledBy0945++
-				}
-			} else {
-				downAgg15.count++
-				downAgg15.sumFollow += followRet15
-				downAgg15.sumFade += fadeRet15
-				if cont15 == 1 {
-					downAgg15.cont++
-				}
-				if filled0945 == 1 {
-					downAgg15.filledBy0945++
-				}
-			}
-			if da := dowAgg15[dow]; da != nil {
-				da.count++
-				da.sumFollow += float64(dir) * ret15
-				da.sumFade += -float64(dir) * ret15
-				if cont15 == 1 {
-					da.cont++
-				}
-				if filled0945 == 1 {
-					da.filledBy0945++
-				}
-			}
-		}
-
 		points = append(points, GapPoint{
-			Date:           dateStr,
+			Date:           sessDate,
 			GapPct:         round3(gapPct),
 			DailyReturnPct: round3(dr),
 			Direction:      dir,
@@ -506,28 +436,18 @@ func analyzeGaps(daily []polygonBar, m15 []polygonBar, minGap float64, years int
 			Close:          close,
 			PrevClose:      prevClose,
 			DayOfWeek:      dow,
-
-			Ret15mPct:    round3(ret15),
-			FilledBy0945: filled0945,
 		})
 	}
 
-	// Build response pieces — daily
-	resp.Data = points
-	resp.CumDates = cumDates
-	resp.CumFade = cumFadeArr
-	resp.CumFollow = cumFollowArr
-
+	// Fill response (daily portion)
 	total := len(points)
-	var contRate float64
+	var contRate, fadeAvg, followAvg float64
 	if total > 0 {
 		contRate = float64(contCount) / float64(total) * 100.0
-	}
-	var fadeAvg, followAvg float64
-	if total > 0 {
 		fadeAvg = fadeSum / float64(total)
 		followAvg = followSum / float64(total)
 	}
+
 	best := "NEUTRAL"
 	exp := 0.0
 	if followAvg > fadeAvg {
@@ -542,6 +462,10 @@ func analyzeGaps(daily []polygonBar, m15 []polygonBar, minGap float64, years int
 		meanAbsGapPct = meanAbsGap / float64(total)
 	}
 
+	resp.Data = points
+	resp.CumDates = cumDates
+	resp.CumFade = cumFadeArr
+	resp.CumFollow = cumFollowArr
 	resp.Summary = Summary{
 		Sessions:         total,
 		ContinuationRate: round1(contRate),
@@ -556,7 +480,7 @@ func analyzeGaps(daily []polygonBar, m15 []polygonBar, minGap float64, years int
 		ExpectedReturn:   round3(exp),
 	}
 
-	// Bins — daily
+	// Bins (daily)
 	outBins := make([]BinStat, 0, len(bins))
 	for _, b := range bins {
 		ba := binAgg[b.lab]
@@ -609,7 +533,174 @@ func analyzeGaps(daily []polygonBar, m15 []polygonBar, minGap float64, years int
 		}
 	}
 
-	// ===== New: 0–15m summary/bins/splits =====
+	return resp, points
+}
+
+// Pass 2: compute 0–15m analytics from 1-minute bars for the selected gap dates.
+func analyzeFirst15(resp *AnalyzeResponse, minutesByDate map[string][]polygonBar) {
+	if resp == nil {
+		return
+	}
+	pts := resp.Data
+	if len(pts) == 0 {
+		return
+	}
+
+	bins := defaultBins(resp.MinGap)
+	type agg15 struct {
+		count, cont, filledBy0945 int
+		sumFade, sumFollow        float64
+	}
+	binAgg15 := map[string]*agg15{}
+	for _, b := range bins {
+		binAgg15[b.lab] = &agg15{}
+	}
+	upAgg15 := agg15{}
+	downAgg15 := agg15{}
+	dowAgg15 := map[string]*agg15{"Mon": {}, "Tue": {}, "Wed": {}, "Thu": {}, "Fri": {}}
+
+	var fadeSum15, followSum15 float64
+	var contCount15, filledBy0945Count, sessions15 int
+
+	for i := range pts {
+		p := &pts[i]
+		mins := minutesByDate[p.Date]
+		if len(mins) == 0 {
+			// No intraday data for this date — leave 0–15m empty for this point
+			continue
+		}
+
+		// Filter to RTH first 15 minutes: 09:30..09:44 (NY)
+		rth := make([]polygonBar, 0, 16)
+		for _, b := range mins {
+			ny := toNY(time.UnixMilli(b.T))
+			if ny.Hour() == 9 && ny.Minute() >= 30 && ny.Minute() <= 44 {
+				rth = append(rth, b)
+			}
+		}
+		if len(rth) == 0 {
+			// Fallback: if provider stamps differently, try using the last minute whose time <= 09:45
+			for _, b := range mins {
+				ny := toNY(time.UnixMilli(b.T))
+				if ny.Hour() == 9 && ny.Minute() <= 45 {
+					rth = append(rth, b)
+				}
+			}
+		}
+		if len(rth) == 0 {
+			continue
+		}
+
+		// 09:30 open (fallback to daily open if the 09:30 minute is missing)
+		var open0930 float64
+		for _, b := range rth {
+			ny := toNY(time.UnixMilli(b.T))
+			if ny.Minute() == 30 {
+				open0930 = b.O
+				break
+			}
+		}
+		if open0930 == 0 {
+			open0930 = p.Open // fallback to daily open
+		}
+		if open0930 <= 0 {
+			continue
+		}
+
+		// 09:45 close ≈ close of the last minute before 09:45 (typically the 09:44 bar).
+		close0945 := rth[len(rth)-1].C
+
+		// Gap-fill by 09:45 within the rth slice
+		filled0945 := 0
+		if p.Direction == 1 {
+			for _, b := range rth {
+				if b.L <= p.PrevClose {
+					filled0945 = 1
+					break
+				}
+			}
+		} else if p.Direction == -1 {
+			for _, b := range rth {
+				if b.H >= p.PrevClose {
+					filled0945 = 1
+					break
+				}
+			}
+		}
+
+		ret15 := (close0945 - open0930) / open0930 * 100.0
+		cont15 := 0
+		if sign(ret15) == p.Direction && p.Direction != 0 && ret15 != 0 {
+			cont15 = 1
+		}
+
+		followRet15 := float64(p.Direction) * ret15
+		fadeRet15 := -float64(p.Direction) * ret15
+
+		followSum15 += followRet15
+		fadeSum15 += fadeRet15
+		contCount15 += cont15
+		filledBy0945Count += filled0945
+		sessions15++
+
+		// Update per-bin / side / DOW aggregates
+		ba := binAgg15[p.Bin]
+		if ba == nil {
+			ba = &agg15{}
+			binAgg15[p.Bin] = ba
+		}
+		ba.count++
+		ba.sumFollow += followRet15
+		ba.sumFade += fadeRet15
+		if cont15 == 1 {
+			ba.cont++
+		}
+		if filled0945 == 1 {
+			ba.filledBy0945++
+		}
+
+		if p.Direction == 1 {
+			upAgg15.count++
+			upAgg15.sumFollow += followRet15
+			upAgg15.sumFade += fadeRet15
+			if cont15 == 1 {
+				upAgg15.cont++
+			}
+			if filled0945 == 1 {
+				upAgg15.filledBy0945++
+			}
+		} else {
+			downAgg15.count++
+			downAgg15.sumFollow += followRet15
+			downAgg15.sumFade += fadeRet15
+			if cont15 == 1 {
+				downAgg15.cont++
+			}
+			if filled0945 == 1 {
+				downAgg15.filledBy0945++
+			}
+		}
+		da := dowAgg15[p.DayOfWeek]
+		if da == nil {
+			da = &agg15{}
+			dowAgg15[p.DayOfWeek] = da
+		}
+		da.count++
+		da.sumFollow += followRet15
+		da.sumFade += fadeRet15
+		if cont15 == 1 {
+			da.cont++
+		}
+		if filled0945 == 1 {
+			da.filledBy0945++
+		}
+
+		// Write back per‑point snapshot
+		p.Ret15mPct = round3(ret15)
+		p.FilledBy0945 = filled0945
+	}
+
+	// Summaries
 	var contRate15, fadeAvg15, followAvg15, fill0945Rate float64
 	if sessions15 > 0 {
 		contRate15 = float64(contCount15) / float64(sessions15) * 100.0
@@ -691,24 +782,9 @@ func analyzeGaps(daily []polygonBar, m15 []polygonBar, minGap float64, years int
 		}
 	}
 
-	return resp
+	// write back updated points
+	resp.Data = pts
 }
-
-func rate(n, d int) float64 {
-	if d == 0 {
-		return 0
-	}
-	return round1(float64(n) / float64(d) * 100.0)
-}
-func avg(sum float64, n int) float64 {
-	if n == 0 {
-		return 0
-	}
-	return round3(sum / float64(n))
-}
-func round1(f float64) float64 { return math.Round(f*10) / 10 }
-func round2(f float64) float64 { return math.Round(f*100) / 100 }
-func round3(f float64) float64 { return math.Round(f*1000) / 1000 }
 
 // ========================= HTTP Handlers =========================
 
@@ -741,18 +817,39 @@ func handleAnalyze(w http.ResponseWriter, r *http.Request) {
 	from := now.AddDate(-years, 0, 0).Format("2006-01-02")
 	to := now.Format("2006-01-02")
 
+	// Step 1: daily analytics
 	daily, err := fetchPolygonDaily(ticker, from, to)
 	if err != nil {
 		http.Error(w, err.Error(), 502)
 		return
 	}
-	m15, err := fetchPolygon15Min(ticker, from, to)
+	resp, points := analyzeDaily(daily, minGap, years, ticker)
+
+	// Collect the specific session dates that passed the daily filter
+	dates := make([]string, 0, len(points))
+	seen := map[string]bool{}
+	for _, p := range points {
+		if !seen[p.Date] {
+			seen[p.Date] = true
+			dates = append(dates, p.Date)
+		}
+	}
+	sort.Strings(dates)
+
+	// Step 2: fetch 1m bars only for those dates
+	minutesByDate, err := fetchPolygon1MinForDates(ticker, dates)
 	if err != nil {
-		http.Error(w, err.Error(), 502)
+		// Don’t fail the entire request; return daily results with a clear error message
+		resp.Success = false
+		resp.Error = "intraday fetch failed: " + err.Error()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
 		return
 	}
 
-	resp := analyzeGaps(daily, m15, minGap, years, ticker)
+	// Step 3: compute 0–15m analytics from those 1m bars
+	analyzeFirst15(&resp, minutesByDate)
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
 }

@@ -178,11 +178,10 @@
 
     let charts = [];
 
-    // Quick picks
+    // Quick picks (only populate the ticker; user must click "Analyze")
     el('quick').addEventListener('click', (e)=>{
       if(e.target.classList.contains('chip')) {
         el('ticker').value = e.target.dataset.t;
-        run();
       }
     });
 
@@ -250,6 +249,7 @@
         <div class="metric"><div class="label">Best 0–15m Strategy</div><div class="value ${bestColor15}">${s15.best_strategy || '-'}</div><div class="neutral">${fmt(s15.expected_return)}% expected</div></div>
         <div class="metric"><div class="label">Gap Fill by 09:45</div><div class="value">${fmt(s15.gap_fill_by_0945_rate)}%</div><div class="neutral">First 15m</div></div>
         <div class="metric"><div class="label">Avg 0–15m Return</div><div class="value">Fade ${fmt(s15.fade_avg)}% • Follow ${fmt(s15.follow_avg)}%</div><div class="${(s15.follow_avg||0)>=(s15.fade_avg||0)?'positive':'negative'}">${(s15.follow_avg||0)>=(s15.fade_avg||0)?'FOLLOW':'FADE'} edge</div></div>
+        <div class="metric"><div class="label">0–15m Coverage</div><div class="value">${s15.sessions||0} / ${d.summary.sessions||0}</div><div class="neutral">sessions with usable 09:45 price</div></div>
       `;
 
       // NEW: side-by-side cards (daily)
@@ -396,8 +396,7 @@
       el('dowTbl').innerHTML = dowHTML;
     }
 
-    // Auto-run first view
-    run();
+    // No auto-run. Wait for the user to press "Analyze".
   </script>
 </body>
 </html>
