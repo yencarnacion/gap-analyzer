@@ -41,6 +41,11 @@
     .chip{border:1px solid var(--border-green);padding:6px 10px;border-radius:16px;background:rgba(0,255,65,.08);cursor:pointer}
     .chip:hover{background:rgba(0,255,65,.16)}
     .footer{opacity:.6;margin-top:18px}
+
+    /* New: side-by-side sections */
+    .sidegrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:16px;margin-top:12px}
+    .small{font-size:.95rem}
+    .subrow{opacity:.8;margin-top:6px}
   </style>
 </head>
 <body>
@@ -98,7 +103,32 @@
         <div class="subtitle" id="sub"></div>
       </div>
 
+      <!-- Overall (daily) metrics -->
       <div class="metrics" id="metrics"></div>
+
+      <!-- NEW: First 15 minutes snapshot -->
+      <div class="panel">
+        <h3>⏱️ First 15 Minutes (to 09:45 ET)</h3>
+        <div class="metrics" id="metrics15"></div>
+      </div>
+
+      <!-- NEW: Side-by-side daily -->
+      <div class="panel">
+        <h3>🔀 Gap‑Up vs Gap‑Down — Daily</h3>
+        <div class="sidegrid" id="sidesDaily"></div>
+        <div style="margin-top:16px">
+          <canvas id="barsSidesDaily"></canvas>
+        </div>
+      </div>
+
+      <!-- NEW: Side-by-side 0–15m -->
+      <div class="panel">
+        <h3>⏱️ Gap‑Up vs Gap‑Down — 0–15m (to 09:45 ET)</h3>
+        <div class="sidegrid" id="sides15"></div>
+        <div style="margin-top:16px">
+          <canvas id="barsSides15"></canvas>
+        </div>
+      </div>
 
       <div class="charts">
         <div class="panel">
@@ -116,6 +146,10 @@
         <div class="panel">
           <h3>Cumulative Returns (ordered by date)</h3>
           <canvas id="cum"></canvas>
+        </div>
+        <div class="panel">
+          <h3>0–15m Strategy Performance (Avg % / trade)</h3>
+          <canvas id="bars15"></canvas>
         </div>
       </div>
 
@@ -171,12 +205,32 @@
       }
     }
 
+    function bestOf(fadeAvg, followAvg){
+      const fa = +fadeAvg || 0, fo = +followAvg || 0;
+      if(fo > fa) return {label:'FOLLOW', expected: fo, cls:'positive'};
+      if(fa > fo) return {label:'FADE', expected: fa, cls:'negative'};
+      return {label:'NEUTRAL', expected: fo, cls:'neutral'};
+    }
+
+    function sideCard(title, side){
+      const b = bestOf(side.fade_avg, side.follow_avg);
+      return `
+        <div class="metric small">
+          <div class="label">${title}</div>
+          <div class="value ${b.cls}">${b.label}</div>
+          <div class="subrow neutral">Expected: ${fmt(b.expected)}%</div>
+          <div class="subrow">Count ${side.count||0} • Cont. ${fmt(side.continuation_rate||0)}%</div>
+          <div class="subrow">Fade ${fmt(side.fade_avg||0)}% • Follow ${fmt(side.follow_avg||0)}%</div>
+        </div>
+      `;
+    }
+
     function renderAll(d){
       // Header
       el('title').textContent = `📈 ${d.ticker}`;
       el('sub').textContent = `${d.summary.sessions} sessions (>= ${d.min_gap}% gap) • ${d.years}y sample`;
 
-      // Metrics
+      // Overall daily metrics
       const s = d.summary;
       const bestColor = s.best_strategy === 'FOLLOW' ? 'positive' : (s.best_strategy==='FADE' ? 'negative':'neutral');
       el('metrics').innerHTML = `
@@ -188,7 +242,27 @@
         <div class="metric"><div class="label">Hint</div><div class="value" style="font-size:1.2rem">Stop @ gap fill • Target 1.5× gap</div><div class="neutral">Position sizing matters</div></div>
       `;
 
-      // Charts cleanup
+      // 0–15m snapshot metrics
+      const s15 = d.summary_15m || {};
+      const bestColor15 = s15.best_strategy === 'FOLLOW' ? 'positive' : (s15.best_strategy==='FADE' ? 'negative':'neutral');
+      el('metrics15').innerHTML = `
+        <div class="metric"><div class="label">09:45 Continuation Rate</div><div class="value">${fmt(s15.continuation_rate)}%</div><div class="neutral">Momentum in first 15m</div></div>
+        <div class="metric"><div class="label">Best 0–15m Strategy</div><div class="value ${bestColor15}">${s15.best_strategy || '-'}</div><div class="neutral">${fmt(s15.expected_return)}% expected</div></div>
+        <div class="metric"><div class="label">Gap Fill by 09:45</div><div class="value">${fmt(s15.gap_fill_by_0945_rate)}%</div><div class="neutral">First 15m</div></div>
+        <div class="metric"><div class="label">Avg 0–15m Return</div><div class="value">Fade ${fmt(s15.fade_avg)}% • Follow ${fmt(s15.follow_avg)}%</div><div class="${(s15.follow_avg||0)>=(s15.fade_avg||0)?'positive':'negative'}">${(s15.follow_avg||0)>=(s15.fade_avg||0)?'FOLLOW':'FADE'} edge</div></div>
+      `;
+
+      // NEW: side-by-side cards (daily)
+      const up = d.gap_up || {};
+      const down = d.gap_down || {};
+      el('sidesDaily').innerHTML = sideCard('Gap‑Up — Daily', up) + sideCard('Gap‑Down — Daily', down);
+
+      // NEW: side-by-side cards (0–15m)
+      const up15 = d.gap_up_15m || {};
+      const down15 = d.gap_down_15m || {};
+      el('sides15').innerHTML = sideCard('Gap‑Up — 0–15m', up15) + sideCard('Gap‑Down — 0–15m', down15);
+
+      // Cleanup old charts
       charts.forEach(ch => ch.destroy()); charts = [];
 
       // Gap Distribution (counts)
@@ -214,7 +288,7 @@
         }
       }); charts.push(scatter);
 
-      // Strategy bars
+      // Strategy bars (daily — overall)
       const bars = new Chart(el('bars'), {
         type:'bar',
         data:{
@@ -240,7 +314,46 @@
         options:{responsive:true, maintainAspectRatio:false, plugins:{legend:{position:'top'}}}
       }); charts.push(cum);
 
-      // Bins table
+      // 0–15m strategy bars (overall)
+      const bars15 = new Chart(el('bars15'), {
+        type:'bar',
+        data:{
+          labels:['FADE 0–15m','FOLLOW 0–15m'],
+          datasets:[{
+            label:'Avg % / trade (0–15m)',
+            data:[(d.summary_15m?.fade_avg)||0, (d.summary_15m?.follow_avg)||0],
+            borderWidth:2
+          }]
+        }, options:{responsive:true, maintainAspectRatio:false}
+      }); charts.push(bars15);
+
+      // NEW: grouped bars — per side (daily)
+      const barsSidesDaily = new Chart(el('barsSidesDaily'), {
+        type:'bar',
+        data:{
+          labels:['Gap‑Up','Gap‑Down'],
+          datasets:[
+            { label:'Fade Avg %',   data:[up.fade_avg||0,   down.fade_avg||0],   borderWidth:2 },
+            { label:'Follow Avg %', data:[up.follow_avg||0, down.follow_avg||0], borderWidth:2 }
+          ]
+        },
+        options:{ responsive:true, maintainAspectRatio:false }
+      }); charts.push(barsSidesDaily);
+
+      // NEW: grouped bars — per side (0–15m)
+      const barsSides15 = new Chart(el('barsSides15'), {
+        type:'bar',
+        data:{
+          labels:['Gap‑Up','Gap‑Down'],
+          datasets:[
+            { label:'Fade 0–15m %',   data:[up15.fade_avg||0,   down15.fade_avg||0],   borderWidth:2 },
+            { label:'Follow 0–15m %', data:[up15.follow_avg||0, down15.follow_avg||0], borderWidth:2 }
+          ]
+        },
+        options:{ responsive:true, maintainAspectRatio:false }
+      }); charts.push(barsSides15);
+
+      // Bins table (daily)
       const binsHTML = `
         <thead><tr>
           <th>Gap Bin</th><th>Count</th><th>Cont. Rate</th><th>Gap Fill Rate</th>
@@ -261,7 +374,7 @@
         </tbody>`;
       el('binsTbl').innerHTML = binsHTML;
 
-      // Day-of-week table
+      // Day-of-week table (daily)
       const order = ['Mon','Tue','Wed','Thu','Fri'];
       const dow = d.by_dow || {};
       const dowHTML = `
