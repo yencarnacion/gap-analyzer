@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <title>US Stocks Gap Analyzer — Fade vs Follow</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+  <style>
+    :root {
+      --neon-green: #00ff41; --dark-green:#00cc33; --bg-black:#0a0a0a; --card-black:#111;
+      --border-green: rgba(0,255,65,.3); --danger:#ff5f56; --warning:#ffbd2e;
+    }
+    *{margin:0;padding:0;box-sizing:border-box}
+    body{font-family:'Courier New',monospace;background:var(--bg-black);color:var(--neon-green);min-height:100vh;padding:20px}
+    .dashboard{max-width:1400px;margin:0 auto;animation:fadeIn .4s ease-out}
+    @keyframes fadeIn{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
+    .panel{background:var(--card-black);border:1px solid var(--border-green);border-radius:10px;padding:24px;box-shadow:0 0 30px rgba(0,255,65,.08);margin-bottom:24px}
+    h1{font-size:2.1rem;text-shadow:0 0 20px var(--neon-green);margin-bottom:6px}
+    .subtitle{opacity:.85}
+    .controls{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px;margin-top:14px}
+    label{font-size:.8rem;letter-spacing:.08em;text-transform:uppercase;opacity:.9;margin-bottom:6px;display:block}
+    input,select,button{padding:12px;border:1px solid var(--border-green);border-radius:6px;background:rgba(0,255,65,.06);color:var(--neon-green);font-family:'Courier New',monospace}
+    input:focus,select:focus,button:focus{outline:none;box-shadow:0 0 10px rgba(0,255,65,.25)}
+    .btn{background:linear-gradient(135deg,var(--dark-green),var(--neon-green));color:#000;font-weight:700;text-transform:uppercase;letter-spacing:1.2px;cursor:pointer}
+    .metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px;margin:18px 0}
+    .metric{background:var(--card-black);border:1px solid var(--border-green);border-radius:8px;padding:18px;position:relative;overflow:hidden}
+    .metric:hover{transform:translateY(-3px);transition:transform .2s ease;border-color:var(--neon-green)}
+    .metric .label{font-size:.8rem;opacity:.8;margin-bottom:6px}
+    .metric .value{font-size:1.9rem;font-weight:700}
+    .positive{color:var(--neon-green)} .negative{color:var(--danger)} .neutral{color:var(--warning)}
+    .charts{display:grid;grid-template-columns:repeat(auto-fit,minmax(520px,1fr));gap:24px}
+    canvas{max-height:380px}
+    .table{overflow-x:auto;background:var(--card-black);border:1px solid var(--border-green);border-radius:8px;padding:18px;margin-top:24px}
+    table{width:100%;border-collapse:collapse}
+    th,td{border:1px solid var(--border-green);padding:10px;text-align:left}
+    th{background:rgba(0,255,65,.08);text-shadow:0 0 6px var(--neon-green)}
+    .error{background:rgba(255,95,86,.08);border-left:4px solid var(--danger);padding:12px;border-radius:6px;margin-top:12px;display:none}
+    .info{background:rgba(0,255,65,.06);border-left:4px solid var(--neon-green);padding:12px;border-radius:6px;margin-top:12px}
+    .quick{display:flex;gap:10px;flex-wrap:wrap;margin-top:10px}
+    .chip{border:1px solid var(--border-green);padding:6px 10px;border-radius:16px;background:rgba(0,255,65,.08);cursor:pointer}
+    .chip:hover{background:rgba(0,255,65,.16)}
+    .footer{opacity:.6;margin-top:18px}
+  </style>
+</head>
+<body>
+  <div class="dashboard">
+    <div class="panel">
+      <h1>🎯 US Stocks Gap Analyzer</h1>
+      <div class="subtitle">Fade vs Follow, with expected returns + win rates (Polygon)</div>
+
+      <div class="quick" id="quick">
+        <!-- quick picks -->
+        <span class="chip" data-t="SPY">SPY</span>
+        <span class="chip" data-t="AAPL">AAPL</span>
+        <span class="chip" data-t="NVDA">NVDA</span>
+        <span class="chip" data-t="MSFT">MSFT</span>
+        <span class="chip" data-t="AMZN">AMZN</span>
+        <span class="chip" data-t="GOOGL">GOOGL</span>
+        <span class="chip" data-t="META">META</span>
+        <span class="chip" data-t="TSLA">TSLA</span>
+        <span class="chip" data-t="JPM">JPM</span>
+        <span class="chip" data-t="AMD">AMD</span>
+      </div>
+
+      <div class="controls">
+        <div>
+          <label for="ticker">Ticker</label>
+          <input id="ticker" placeholder="e.g., AAPL" value="AAPL"/>
+        </div>
+        <div>
+          <label for="years">Years</label>
+          <select id="years">
+            <option value="1">1 year</option>
+            <option value="2">2 years</option>
+            <option value="3" selected>3 years</option>
+            <option value="4">4 years</option>
+            <option value="5">5 years</option>
+          </select>
+        </div>
+        <div>
+          <label for="minGap">Min Gap %</label>
+          <input id="minGap" type="number" step="0.1" min="0.1" max="10" value="0.3"/>
+        </div>
+        <div>
+          <label>&nbsp;</label>
+          <button id="go" class="btn">Analyze</button>
+        </div>
+      </div>
+
+      <div class="error" id="err"></div>
+      <div class="info">Tip: “Follow” = ride in gap direction (long after gap‑up, short after gap‑down). “Fade” = bet on reversal.</div>
+    </div>
+
+    <div class="panel">
+      <div id="header">
+        <h2 id="title">📈 (Awaiting analysis)</h2>
+        <div class="subtitle" id="sub"></div>
+      </div>
+
+      <div class="metrics" id="metrics"></div>
+
+      <div class="charts">
+        <div class="panel">
+          <h3>Gap Distribution</h3>
+          <canvas id="gapDist"></canvas>
+        </div>
+        <div class="panel">
+          <h3>Gap vs Intraday Return</h3>
+          <canvas id="scatter"></canvas>
+        </div>
+        <div class="panel">
+          <h3>Strategy Performance (Avg % / trade)</h3>
+          <canvas id="bars"></canvas>
+        </div>
+        <div class="panel">
+          <h3>Cumulative Returns (ordered by date)</h3>
+          <canvas id="cum"></canvas>
+        </div>
+      </div>
+
+      <div class="table">
+        <h3>Gap Size Bins — Performance</h3>
+        <table id="binsTbl"></table>
+      </div>
+
+      <div class="table">
+        <h3>Day of Week — Continuation & Returns</h3>
+        <table id="dowTbl"></table>
+      </div>
+
+      <div class="footer">Research only. Not investment advice.</div>
+    </div>
+  </div>
+
+  <script>
+    Chart.defaults.color = '#00ff41';
+    Chart.defaults.borderColor = 'rgba(0,255,65,.2)';
+    Chart.defaults.font.family = "'Courier New', monospace";
+
+    const el = id => document.getElementById(id);
+    const fmt = n => (n==null || isNaN(n) ? '-' : (+n).toFixed(2));
+    const round1 = n => Math.round(n*10)/10;
+
+    let charts = [];
+
+    // Quick picks
+    el('quick').addEventListener('click', (e)=>{
+      if(e.target.classList.contains('chip')) {
+        el('ticker').value = e.target.dataset.t;
+        run();
+      }
+    });
+
+    el('go').onclick = run;
+
+    async function run(){
+      const ticker = el('ticker').value.trim().toUpperCase();
+      const years = el('years').value;
+      const minGap = parseFloat(el('minGap').value);
+      el('err').style.display='none';
+      if(!ticker){ el('err').textContent='Enter a ticker'; el('err').style.display='block'; return; }
+
+      try{
+        const {data} = await axios.get('/api/gaps', { params: { ticker, years, minGap } });
+        if(!data.success){ throw new Error(data.error || 'Analysis failed'); }
+        renderAll(data);
+      }catch(err){
+        el('err').textContent = 'ERROR: ' + (err.response?.data || err.message);
+        el('err').style.display='block';
+      }
+    }
+
+    function renderAll(d){
+      // Header
+      el('title').textContent = `📈 ${d.ticker}`;
+      el('sub').textContent = `${d.summary.sessions} sessions (>= ${d.min_gap}% gap) • ${d.years}y sample`;
+
+      // Metrics
+      const s = d.summary;
+      const bestColor = s.best_strategy === 'FOLLOW' ? 'positive' : (s.best_strategy==='FADE' ? 'negative':'neutral');
+      el('metrics').innerHTML = `
+        <div class="metric"><div class="label">Continuation Rate</div><div class="value">${fmt(s.continuation_rate)}%</div><div class="neutral">Momentum > 50%</div></div>
+        <div class="metric"><div class="label">Best Strategy</div><div class="value ${bestColor}">${s.best_strategy}</div><div class="neutral">${fmt(s.expected_return)}% expected</div></div>
+        <div class="metric"><div class="label">Gap-Ups / Gap-Downs</div><div class="value">${s.gap_ups} / ${s.gap_downs}</div><div class="neutral">Mean |gap| ${fmt(s.mean_gap)}%</div></div>
+        <div class="metric"><div class="label">Avg Return / Trade</div><div class="value">Fade ${fmt(s.fade_avg)}% • Follow ${fmt(s.follow_avg)}%</div><div class="${s.follow_avg>=s.fade_avg?'positive':'negative'}">${s.follow_avg>=s.fade_avg?'FOLLOW':'FADE'} edge</div></div>
+        <div class="metric"><div class="label">Max Gap</div><div class="value">${fmt(Math.max(Math.abs(s.max_gap_up), Math.abs(s.max_gap_down)))}%</div><div class="neutral">Abs</div></div>
+        <div class="metric"><div class="label">Hint</div><div class="value" style="font-size:1.2rem">Stop @ gap fill • Target 1.5× gap</div><div class="neutral">Position sizing matters</div></div>
+      `;
+
+      // Charts cleanup
+      charts.forEach(ch => ch.destroy()); charts = [];
+
+      // Gap Distribution (counts)
+      const binLabels = d.bins.map(b=>b.label);
+      const binCounts = d.bins.map(b=>b.count);
+      const gapDist = new Chart(el('gapDist'), {
+        type:'bar',
+        data:{ labels:binLabels, datasets:[{label:'Count', data:binCounts, borderWidth:2}] },
+        options:{ responsive:true, maintainAspectRatio:false }
+      }); charts.push(gapDist);
+
+      // Scatter Gap vs Return
+      const pts = d.data.map(p=>({x:p.gap_pct, y:p.daily_return_pct}));
+      const scatter = new Chart(el('scatter'), {
+        type:'scatter',
+        data:{ datasets: [{ label:'Gap vs Return', data: pts, pointRadius:3 }]},
+        options:{
+          responsive:true, maintainAspectRatio:false,
+          scales:{
+            x:{ title:{display:true, text:'Gap (%)'}},
+            y:{ title:{display:true, text:'Intraday return (%)'}}
+          }
+        }
+      }); charts.push(scatter);
+
+      // Strategy bars
+      const bars = new Chart(el('bars'), {
+        type:'bar',
+        data:{
+          labels:['FADE','FOLLOW'],
+          datasets:[{
+            label:'Avg % / trade',
+            data:[d.summary.fade_avg, d.summary.follow_avg],
+            borderWidth:2
+          }]
+        }, options:{responsive:true, maintainAspectRatio:false}
+      }); charts.push(bars);
+
+      // Cumulative lines
+      const cum = new Chart(el('cum'), {
+        type:'line',
+        data:{
+          labels: d.cum_dates,
+          datasets:[
+            {label:'Fade', data:d.cum_fade, borderWidth:2, fill:false, tension:.1, pointRadius:0},
+            {label:'Follow', data:d.cum_follow, borderWidth:2, fill:false, tension:.1, pointRadius:0}
+          ]
+        },
+        options:{responsive:true, maintainAspectRatio:false, plugins:{legend:{position:'top'}}}
+      }); charts.push(cum);
+
+      // Bins table
+      const binsHTML = `
+        <thead><tr>
+          <th>Gap Bin</th><th>Count</th><th>Cont. Rate</th><th>Gap Fill Rate</th>
+          <th>Fade Avg %</th><th>Follow Avg %</th><th>Signal</th>
+        </tr></thead>
+        <tbody>
+          ${d.bins.map(b=>`
+            <tr>
+              <td>${b.label}</td>
+              <td>${b.count}</td>
+              <td class="${b.continuation_rate>50?'positive':'negative'}">${fmt(b.continuation_rate)}%</td>
+              <td>${fmt(b.gap_fill_rate)}%</td>
+              <td class="${b.fade_avg>0?'positive':'negative'}">${fmt(b.fade_avg)}</td>
+              <td class="${b.follow_avg>0?'positive':'negative'}">${fmt(b.follow_avg)}</td>
+              <td><strong>${b.recommendation}</strong></td>
+            </tr>
+          `).join('')}
+        </tbody>`;
+      el('binsTbl').innerHTML = binsHTML;
+
+      // Day-of-week table
+      const order = ['Mon','Tue','Wed','Thu','Fri'];
+      const dow = d.by_dow || {};
+      const dowHTML = `
+        <thead><tr>
+          <th>Day</th><th>Count</th><th>Cont. Rate</th><th>Fade Avg %</th><th>Follow Avg %</th>
+        </tr></thead>
+        <tbody>
+          ${order.map(k=>{
+            const o = dow[k] || {count:0, continuation_rate:0, fade_avg:0, follow_avg:0};
+            return `<tr>
+              <td>${k}</td>
+              <td>${o.count||0}</td>
+              <td class="${(o.continuation_rate||0)>50?'positive':'negative'}">${fmt(o.continuation_rate||0)}%</td>
+              <td class="${(o.fade_avg||0)>0?'positive':'negative'}">${fmt(o.fade_avg||0)}</td>
+              <td class="${(o.follow_avg||0)>0?'positive':'negative'}">${fmt(o.follow_avg||0)}</td>
+            </tr>`;
+          }).join('')}
+        </tbody>`;
+      el('dowTbl').innerHTML = dowHTML;
+    }
+
+    // Auto-run first view
+    run();
+  </script>
+</body>
+</html>
